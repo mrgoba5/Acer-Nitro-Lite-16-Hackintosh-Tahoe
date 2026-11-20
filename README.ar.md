@@ -1,6 +1,6 @@
 <div dir="rtl">
 
-# تشغيل macOS Tahoe على لابتوب Acer Nitro Lite 16 ‏(NL16-71G)
+# تشغيل macOS Tahoe على لابتوب Acer Nitro Lite 16 موديل NL16-71G
 
 [English](README.md) | **العربية**
 
