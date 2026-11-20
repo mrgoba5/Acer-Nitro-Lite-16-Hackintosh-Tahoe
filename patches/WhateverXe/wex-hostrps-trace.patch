@@ -1,0 +1,55 @@
+--- kern_xe.cpp.before-hostrps	2026-11-19 09:41:20.274527575 +0000
++++ kern_xe.cpp	2026-11-19 09:41:20.331499092 +0000
+@@ -554,6 +554,9 @@
+ uintptr_t tglOriginalPMNotify {};
+ uint64_t tglHostRPSCalls {}, tglHostRPSAnswered {};
+ uint32_t tglHostRPSLast {}, tglHostRPSCap {};
++// local trace (hostrps-trace): what Apple's pmNotify caller passes, to design an idle governor
++uint64_t tglHostRPSEv[4] {};           // calls with event 0,1,2,other
++uint64_t tglHostRPSLastArgs[8] {};     // priority, event, usage ptr!=0, usage[0], usage[1], req(ec8), boost(ecc), uptime ns
+ static uint32_t tglHostRPSEncode(uint32_t requested,uint32_t boost,uint32_t caps) {
+  const uint32_t lo=(caps>>16)&255,hi=caps&255;
+  if(!lo || lo>hi || hi>85)return 0;
+@@ -563,6 +566,15 @@
+ }
+ uint32_t tglHostPMNotify(void *controller,uint32_t priority,uint32_t event,uint64_t *usage,uint32_t *frequency) {
+  __atomic_fetch_add(&tglHostRPSCalls,1ULL,__ATOMIC_RELAXED);
++ __atomic_fetch_add(&tglHostRPSEv[event<3?event:3],1ULL,__ATOMIC_RELAXED);
++ {
++  uint64_t t;clock_get_uptime(&t);uint64_t ns=0;absolutetime_to_nanoseconds(t,&ns);
++  auto cc=static_cast<uint8_t *>(controller);
++  tglHostRPSLastArgs[0]=priority;tglHostRPSLastArgs[1]=event;tglHostRPSLastArgs[2]=usage!=nullptr;
++  tglHostRPSLastArgs[3]=usage?usage[0]:0;tglHostRPSLastArgs[4]=usage?usage[1]:0;
++  tglHostRPSLastArgs[5]=cc?*reinterpret_cast<uint32_t *>(cc+0xec8):0;tglHostRPSLastArgs[6]=cc?*reinterpret_cast<uint32_t *>(cc+0xecc):0;
++  tglHostRPSLastArgs[7]=ns;
++ }
+  auto c=static_cast<uint8_t *>(controller);
+  if(c && event==1 && frequency && !c[0xb68]) {
+   auto access=*reinterpret_cast<uint8_t **>(c+0xc40);
+@@ -584,6 +596,16 @@
+  }
+  return FunctionCast(tglHostPMNotify,tglOriginalPMNotify)(controller,priority,event,usage,frequency);
+ }
++// hostrps-trace serializer: {3001, calls, answered, ev0, ev1, ev2, evOther, last encoded, priority, event, usagePtr, usage0, usage1, req, boost, ns}
++bool tglHostRPSTraceSerialize(void *,void *,OSSerialize *serializer) {
++ uint64_t q[16] {3001};
++ q[1]=__atomic_load_n(&tglHostRPSCalls,__ATOMIC_RELAXED);q[2]=__atomic_load_n(&tglHostRPSAnswered,__ATOMIC_RELAXED);
++ for(unsigned i=0;i<4;++i)q[3+i]=__atomic_load_n(&tglHostRPSEv[i],__ATOMIC_RELAXED);
++ q[7]=__atomic_load_n(&tglHostRPSLast,__ATOMIC_RELAXED);
++ for(unsigned i=0;i<8;++i)q[8+i]=tglHostRPSLastArgs[i];
++ auto data=OSData::withBytes(q,sizeof(q));if(!data)return false;
++ const bool ok=data->serialize(serializer);data->release();return ok;
++}
+ // r284: bounded on-demand power observation. These four registers are in the
+ // always-accessible power/mirror range; do not acquire forcewake or write MMIO.
+ // Linux v6.12: GEN12_RPSTAT1[19:11] * 50/3 MHz; RC6 ticks are 1280 ns.
+@@ -8467,6 +8489,9 @@
+   if(auto power=OSSerializer::forTarget(that,adlnGTPowerSerialize)) {
+    that->setProperty("N97GTPowerSample",power);power->release();
+   }
++  if(auto trace=OSSerializer::forTarget(that,tglHostRPSTraceSerialize)) {
++   that->setProperty("N97HostRPSTrace",trace);trace->release();
++  }
+  }
+ 	IORegistryEntry::getRegistryRoot()->setProperty("N97FramebufferStartAccepted",accepted);
+ 	return accepted;

@@ -1,0 +1,42 @@
+--- kern_xe.cpp.before-governor	2026-11-19 11:42:41.449148510 +0000
++++ kern_xe.cpp	2026-11-19 12:30:47.102989081 +0000
+@@ -571,7 +571,7 @@
+   uint64_t t;clock_get_uptime(&t);uint64_t ns=0;absolutetime_to_nanoseconds(t,&ns);
+   auto cc=static_cast<uint8_t *>(controller);
+   tglHostRPSLastArgs[0]=priority;tglHostRPSLastArgs[1]=event;tglHostRPSLastArgs[2]=usage!=nullptr;
+-  tglHostRPSLastArgs[3]=usage?usage[0]:0;tglHostRPSLastArgs[4]=usage?usage[1]:0;
++  if(!usage){tglHostRPSLastArgs[3]=0;tglHostRPSLastArgs[4]=0;}
+   tglHostRPSLastArgs[5]=cc?*reinterpret_cast<uint32_t *>(cc+0xec8):0;tglHostRPSLastArgs[6]=cc?*reinterpret_cast<uint32_t *>(cc+0xecc):0;
+   tglHostRPSLastArgs[7]=ns;
+  }
+@@ -582,8 +582,29 @@
+    auto base=*reinterpret_cast<volatile uint8_t **>(access+0x50);
+    if(base) {
+     const uint32_t caps=*reinterpret_cast<volatile uint32_t *>(base+0x145998);
+-    const uint32_t encoded=tglHostRPSEncode(*reinterpret_cast<uint32_t *>(c+0xec8),
++    uint32_t encoded=tglHostRPSEncode(*reinterpret_cast<uint32_t *>(c+0xec8),
+       *reinterpret_cast<uint32_t *>(c+0xecc),caps);
++    // local (hostrps-governor): Apple's request is stuck at max without GuC, so choose the frequency from
++    // render-engine activity. RCS RING_MI_MODE (0x209C) bit 9 = engine idle. 8 samples, 20 us apart.
++    // busy -> RP0 and hold ~1 s; light -> midpoint; idle -> RPn. -wex-hostrps-max keeps the old behaviour.
++    static int maxMode=-1; if(maxMode<0)maxMode=checkKernelArgument("-wex-hostrps-max")?1:0;
++    const uint32_t lo=(caps>>16)&255,hi=caps&255;
++    if(encoded && !maxMode && lo && lo<=hi) {
++     // v3: pmNotify is called around GPU activity, so per-call samples are biased towards "busy".
++     // Use time instead: RP0 only after the engine has been seen busy with no idle sample for 300 ms,
++     // then hold RP0 for 500 ms; otherwise RPn.
++     static uint64_t lastIdle=0,hiUntil=0,lastCall=0;
++     uint32_t busy=0;
++     for(unsigned i=0;i<8;++i){ if(!(*reinterpret_cast<volatile uint32_t *>(base+0x209C)&0x200))busy++; if(i<7)IODelay(20); }
++     uint64_t t;clock_get_uptime(&t);uint64_t now=0;absolutetime_to_nanoseconds(t,&now);
++     // no call for >100 ms means nothing was submitted: count that gap as idle, not as busy time
++     if(busy<6 || !lastIdle || now-lastCall>100000000ULL)lastIdle=now;
++     lastCall=now;
++     if(now-lastIdle>=300000000ULL)hiUntil=now+500000000ULL;
++     const uint32_t f=now<hiUntil ? hi : lo;
++     encoded=(f*3)<<23;
++     tglHostRPSLastArgs[3]=busy; tglHostRPSLastArgs[4]=(now-lastIdle)/1000000ULL; // ms continuously busy
++    }
+     if(encoded) {
+      *frequency=encoded;
+      __atomic_store_n(&tglHostRPSCap,caps,__ATOMIC_RELAXED);

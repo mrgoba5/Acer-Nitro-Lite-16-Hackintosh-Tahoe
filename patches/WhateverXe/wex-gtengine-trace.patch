@@ -1,0 +1,45 @@
+--- kern_xe.cpp.before-gtengine	2026-11-19 11:26:09.538982365 +0000
++++ kern_xe.cpp	2026-11-19 11:26:09.701045067 +0000
+@@ -4781,6 +4781,32 @@
+  auto data=OSData::withBytes(q,sizeof(q));if(!data)return false;
+  const bool ok=data->serialize(serializer);data->release();return ok;
+ }
++// local (gtengine-trace): read-only GT engine/RC6/RPS registers for an idle governor + RC6 study.
++// Same guards as adlnGTPowerSerialize; no forcewake, no writes. RC6 is off here, so the GT is awake.
++static bool adlnGTEngineSerialize(void *target,void *,OSSerialize *serializer) {
++ static uint32_t reads=0;
++ static const uint32_t regs[] {
++  0x2030,0x2034,0x2074,0x209C,0x2358,0x23A8,0x2234,0x2238,   // RCS tail, head, acthd, mi_mode, timestamp, ctx_timestamp, execlist status lo/hi
++  0xA008,0xA024,0xA050,0xA054,0xA058,0xA05C,0xA090,0xA094,   // RPNSWREQ, RP_CONTROL, cur up EI/up, cur down EI/down, RC_CONTROL, RC_STATE
++  0xA0A8,0xA0AC,0xA0B8,0xA210,0xA06C,0x1381B4,0x138108,0xA188 // RC EI, RC hyst, RC6 threshold, PG_ENABLE, RP_INTERRUPT_LIMITS?, RPSTAT1, RC6 count, FORCEWAKE_RENDER ack
++ };
++ constexpr unsigned N=sizeof(regs)/sizeof(regs[0]);
++ uint64_t q[4+N] {4001};auto &c=display13FBPower;
++ q[1]=__atomic_fetch_add(&reads,1U,__ATOMIC_RELAXED);
++ auto service=static_cast<IOService *>(target);
++ if(q[1]<4096 && service && c.controller==target && service->getMetaClass()->getClassSize()>=0x1C20 &&
++    c.access && c.map && c.map->getLength()==0x1000000 && c.map->getVirtualAddress() &&
++    Display13FBMemory::field<void *>(target,0xC40)==c.access &&
++    ::adlnWriterMappingBound() &&
++    Display13FBMemory::field<uint32_t>(c.access,0x60)>=0x146000) {
++  auto base=reinterpret_cast<volatile uint8_t *>(c.map->getVirtualAddress());
++  uint64_t t;clock_get_uptime(&t);absolutetime_to_nanoseconds(t,q+2);
++  for(unsigned i=0;i<N;++i)q[4+i]=*reinterpret_cast<volatile uint32_t *>(base+regs[i]);
++  q[3]=1;
++ }
++ auto data=OSData::withBytes(q,sizeof(q));if(!data)return false;
++ const bool ok=data->serialize(serializer);data->release();return ok;
++}
+ // Memory init precedes native PowerWell init. Own an uncached BAR mapping
+ // here; it authorizes only GGTT reads and the two reserved auxiliary spans.
+ // Keep backing pinned on partial-write/start failure through reboot.
+@@ -8492,6 +8518,9 @@
+   if(auto trace=OSSerializer::forTarget(that,tglHostRPSTraceSerialize)) {
+    that->setProperty("N97HostRPSTrace",trace);trace->release();
+   }
++  if(auto eng=OSSerializer::forTarget(that,adlnGTEngineSerialize)) {
++   that->setProperty("N97GTEngineSample",eng);eng->release();
++  }
+  }
+ 	IORegistryEntry::getRegistryRoot()->setProperty("N97FramebufferStartAccepted",accepted);
+ 	return accepted;
